@@ -36,7 +36,7 @@ GMAIL_ACCOUNTS = os.environ.get("GMAIL_ACCOUNTS", "").split(",")
 API_KEY = os.environ.get("API_KEY", "")
 
 # Server URL for OAuth callback
-SERVER_URL = os.environ.get("SERVER_URL", "https://chief-of-staff-cos.fly.dev")
+SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-a841f.up.railway.app")
 
 # Create data directory
 os.makedirs(DATA_DIR, exist_ok=True)
