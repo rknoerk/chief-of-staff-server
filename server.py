@@ -28,6 +28,9 @@ GMAIL_CLIENT_ID = os.environ.get("GMAIL_CLIENT_ID", "")
 GMAIL_CLIENT_SECRET = os.environ.get("GMAIL_CLIENT_SECRET", "")
 GMAIL_ACCOUNTS = os.environ.get("GMAIL_ACCOUNTS", "").split(",")
 
+# Simple API Key (optional, for Claude WebFetch)
+API_KEY = os.environ.get("API_KEY", "")
+
 # Create data directory
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -161,28 +164,57 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         self.end_headers()
+
+    def _check_api_key(self):
+        """Check API key from query param or header. Returns True if valid or no key required."""
+        if not API_KEY:
+            return True  # No API key configured, allow all
+
+        # Check query param ?key=xxx
+        parsed = urlparse(self.path)
+        params = parse_qs(parsed.query)
+        if params.get("key", [None])[0] == API_KEY:
+            return True
+
+        # Check header X-API-Key or Authorization
+        if self.headers.get("X-API-Key") == API_KEY:
+            return True
+        auth = self.headers.get("Authorization", "")
+        if auth.startswith("Bearer ") and auth[7:] == API_KEY:
+            return True
+
+        return False
 
     def do_OPTIONS(self):
         self._set_headers(204)
 
     def do_GET(self):
         global tasks_data, notes_data
-        path = urlparse(self.path).path
+        parsed = urlparse(self.path)
+        path = parsed.path
 
-        # Health check
+        # Health check (always allowed)
         if path == "/health":
             self._set_headers()
             self.wfile.write(json.dumps({
                 "status": "ok",
                 "tasks": len(tasks_data.get("tasks", [])),
                 "notes": len(notes_data.get("notes", [])),
-                "gmail_accounts": [e for e in GMAIL_ACCOUNTS if e]
+                "gmail_accounts": [e for e in GMAIL_ACCOUNTS if e],
+                "api_key_required": bool(API_KEY)
             }).encode())
+            return
+
+        # Check API key for all other endpoints
+        if not self._check_api_key():
+            self._set_headers(401)
+            self.wfile.write(json.dumps({"error": "Unauthorized. Add ?key=YOUR_API_KEY to URL"}).encode())
+            return
 
         # === TASKS ===
-        elif path == "/tasks":
+        if path == "/tasks":
             self._set_headers()
             self.wfile.write(json.dumps(tasks_data).encode())
 
