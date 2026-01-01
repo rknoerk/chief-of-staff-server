@@ -7,6 +7,7 @@ primary_region = "fra"  # Frankfurt
 
 [env]
   DATA_DIR = "/data"
+  SERVER_URL = "https://chief-of-staff-cos.fly.dev"
 
 [http_service]
   internal_port = 8080

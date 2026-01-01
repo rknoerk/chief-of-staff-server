@@ -1,13 +1,15 @@
 #!/usr/bin/env python3
 """
-Chief of Staff Server - Railway Edition
-Combined Amplenote + Gmail server for cloud deployment.
+Chief of Staff Server
+Combined Amplenote + Gmail server with Google Sign-In authentication.
 """
 import json
 import os
+import secrets
+import hashlib
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime, timedelta
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlencode
 import base64
 
 # Google API imports
@@ -15,6 +17,8 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 
 # =============================================================================
 # Configuration from Environment Variables
@@ -31,11 +35,125 @@ GMAIL_ACCOUNTS = os.environ.get("GMAIL_ACCOUNTS", "").split(",")
 # Simple API Key (optional, for Claude WebFetch)
 API_KEY = os.environ.get("API_KEY", "")
 
+# Server URL for OAuth callback
+SERVER_URL = os.environ.get("SERVER_URL", "https://chief-of-staff-cos.fly.dev")
+
 # Create data directory
 os.makedirs(DATA_DIR, exist_ok=True)
 
 TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
 NOTES_FILE = os.path.join(DATA_DIR, "notes.json")
+DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
+CONTEXT_FILE = os.path.join(DATA_DIR, "context.json")
+
+# =============================================================================
+# Chief of Staff Skill Instructions (for mobile)
+# =============================================================================
+
+COS_SKILL_INSTRUCTIONS = """
+# Chief of Staff
+
+Du bist mein Chief of Staff. Hilf mir meinen Tag zu organisieren.
+
+## Setup
+
+Falls kein Token vorhanden, zeige:
+"Hol dir deinen Token: https://chief-of-staff-cos.fly.dev/login"
+Frage dann: "Wie lautet dein Token?"
+
+## Nach Token-Eingabe
+
+Frage: "Was kann ich für dich tun? 1. Briefing, 2. Tasks, 3. Emails, 4. Kontext, 5. Frage"
+
+## Endpoints (mit ?key=cos-2026-mobile&token=USER_TOKEN)
+
+- Context: https://chief-of-staff-cos.fly.dev/context
+- Tasks heute: https://chief-of-staff-cos.fly.dev/tasks/today
+- Emails: https://chief-of-staff-cos.fly.dev/emails/unread
+- Werkbank: https://chief-of-staff-cos.fly.dev/notes/werkbank
+- Projekte: https://chief-of-staff-cos.fly.dev/notes/projects
+
+## Briefing Format
+
+Guten Morgen! [Datum]
+
+**Kontext:** [Aus CLAUDE.md]
+
+**Top 3 Tasks:** [Höchster Score]
+1. [Task] - Score X
+2. [Task] - Score X
+3. [Task] - Score X
+
+**Emails:** [Anzahl] ungelesen
+- [Absender]: [Betreff]
+
+**Projekte:** [Aus Werkbank]
+
+Frage: "Worauf fokussierst du dich heute?"
+
+## Regeln
+- Deutsch
+- Prägnant
+- Bei 403/401: Token-Problem erklären
+"""
+
+# =============================================================================
+# Device Token Storage
+# =============================================================================
+
+devices_data = {"devices": []}
+
+def load_devices():
+    global devices_data
+    if os.path.exists(DEVICES_FILE):
+        try:
+            with open(DEVICES_FILE, "r") as f:
+                devices_data = json.load(f)
+        except: pass
+
+def save_devices():
+    with open(DEVICES_FILE, "w") as f:
+        json.dump(devices_data, f, indent=2)
+
+def generate_device_token():
+    """Generate a secure random device token."""
+    return secrets.token_urlsafe(32)
+
+def hash_token(token):
+    """Hash a token for storage (we only store hashes)."""
+    return hashlib.sha256(token.encode()).hexdigest()
+
+def validate_device_token(token):
+    """Check if a device token is valid. Returns device info or None."""
+    if not token:
+        return None
+    token_hash = hash_token(token)
+    for device in devices_data.get("devices", []):
+        if device.get("token_hash") == token_hash:
+            # Check expiry
+            expires_at = device.get("expires_at")
+            if expires_at and datetime.fromisoformat(expires_at) < datetime.now():
+                return None
+            # Update last used
+            device["last_used"] = datetime.now().isoformat()
+            save_devices()
+            return device
+    return None
+
+def create_device(email, device_name="Unknown Device"):
+    """Create a new device token for an authenticated user."""
+    token = generate_device_token()
+    device = {
+        "token_hash": hash_token(token),
+        "email": email,
+        "device_name": device_name,
+        "created_at": datetime.now().isoformat(),
+        "expires_at": (datetime.now() + timedelta(days=90)).isoformat(),
+        "last_used": datetime.now().isoformat()
+    }
+    devices_data["devices"].append(device)
+    save_devices()
+    return token  # Return the unhashed token to give to user
 
 # =============================================================================
 # Data Storage
@@ -43,9 +161,10 @@ NOTES_FILE = os.path.join(DATA_DIR, "notes.json")
 
 tasks_data = {"tasks": [], "syncedAt": None}
 notes_data = {"notes": [], "syncedAt": None}
+context_data = {"files": {}, "syncedAt": None}
 
 def load_data():
-    global tasks_data, notes_data
+    global tasks_data, notes_data, context_data
     if os.path.exists(TASKS_FILE):
         try:
             with open(TASKS_FILE, "r") as f:
@@ -56,6 +175,11 @@ def load_data():
             with open(NOTES_FILE, "r") as f:
                 notes_data = json.load(f)
         except: pass
+    if os.path.exists(CONTEXT_FILE):
+        try:
+            with open(CONTEXT_FILE, "r") as f:
+                context_data = json.load(f)
+        except: pass
 
 def save_tasks():
     with open(TASKS_FILE, "w") as f:
@@ -64,6 +188,10 @@ def save_tasks():
 def save_notes():
     with open(NOTES_FILE, "w") as f:
         json.dump(notes_data, f, indent=2)
+
+def save_context():
+    with open(CONTEXT_FILE, "w") as f:
+        json.dump(context_data, f, indent=2)
 
 # =============================================================================
 # Gmail Functions
@@ -167,25 +295,38 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization, X-API-Key")
         self.end_headers()
 
-    def _check_api_key(self):
-        """Check API key from query param or header. Returns True if valid or no key required."""
-        if not API_KEY:
-            return True  # No API key configured, allow all
+    def _check_auth(self, allow_api_key=False):
+        """Check authentication via device token (and optionally API key for POST).
 
-        # Check query param ?key=xxx
+        Args:
+            allow_api_key: If True, also accept API key (for Amplenote sync POST requests)
+        """
         parsed = urlparse(self.path)
         params = parse_qs(parsed.query)
-        if params.get("key", [None])[0] == API_KEY:
+
+        # Check device token first (always accepted)
+        token = params.get("token", [None])[0]
+        if not token:
+            auth = self.headers.get("Authorization", "")
+            if auth.startswith("Bearer "):
+                token = auth[7:]
+        if token and validate_device_token(token):
             return True
 
-        # Check header X-API-Key or Authorization
-        if self.headers.get("X-API-Key") == API_KEY:
-            return True
-        auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[7:] == API_KEY:
-            return True
+        # API key only allowed for specific endpoints (POST for sync)
+        if allow_api_key and API_KEY:
+            if params.get("key", [None])[0] == API_KEY:
+                return True
+            if self.headers.get("X-API-Key") == API_KEY:
+                return True
 
         return False
+
+    def _set_html_headers(self, status=200):
+        """Set headers for HTML response."""
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
 
     def do_OPTIONS(self):
         self._set_headers(204)
@@ -194,23 +335,177 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
         global tasks_data, notes_data
         parsed = urlparse(self.path)
         path = parsed.path
+        params = parse_qs(parsed.query)
 
-        # Health check (always allowed)
+        # === PUBLIC ENDPOINTS (no auth required) ===
+
+        # Health check
         if path == "/health":
             self._set_headers()
             self.wfile.write(json.dumps({
                 "status": "ok",
                 "tasks": len(tasks_data.get("tasks", [])),
                 "notes": len(notes_data.get("notes", [])),
-                "gmail_accounts": [e for e in GMAIL_ACCOUNTS if e],
-                "api_key_required": bool(API_KEY)
+                "gmail_accounts": len([e for e in GMAIL_ACCOUNTS if e]),
+                "devices": len(devices_data.get("devices", []))
             }).encode())
             return
 
-        # Check API key for all other endpoints
-        if not self._check_api_key():
+        # Skill instructions for mobile Claude
+        if path == "/skill":
+            self._set_headers()
+            self.wfile.write(json.dumps({
+                "skill": "Chief of Staff",
+                "instructions": COS_SKILL_INSTRUCTIONS
+            }).encode())
+            return
+
+        # === GOOGLE SIGN-IN FLOW ===
+
+        # Login page - redirects to Google
+        if path == "/login":
+            # Build Google OAuth URL
+            state = secrets.token_urlsafe(16)
+            oauth_params = {
+                "client_id": GMAIL_CLIENT_ID,
+                "redirect_uri": f"{SERVER_URL}/callback",
+                "response_type": "code",
+                "scope": "openid email profile",
+                "state": state,
+                "access_type": "online",
+                "prompt": "select_account"
+            }
+            google_auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(oauth_params)}"
+
+            # Redirect to Google
+            self.send_response(302)
+            self.send_header("Location", google_auth_url)
+            self.end_headers()
+            return
+
+        # OAuth callback from Google
+        if path == "/callback":
+            code = params.get("code", [None])[0]
+            error = params.get("error", [None])[0]
+
+            if error:
+                self._set_html_headers(400)
+                self.wfile.write(f"<h1>Login Failed</h1><p>{error}</p>".encode())
+                return
+
+            if not code:
+                self._set_html_headers(400)
+                self.wfile.write(b"<h1>Login Failed</h1><p>No authorization code received</p>")
+                return
+
+            try:
+                # Exchange code for tokens
+                import urllib.request
+                token_data = urlencode({
+                    "code": code,
+                    "client_id": GMAIL_CLIENT_ID,
+                    "client_secret": GMAIL_CLIENT_SECRET,
+                    "redirect_uri": f"{SERVER_URL}/callback",
+                    "grant_type": "authorization_code"
+                }).encode()
+
+                req = urllib.request.Request(
+                    "https://oauth2.googleapis.com/token",
+                    data=token_data,
+                    headers={"Content-Type": "application/x-www-form-urlencoded"}
+                )
+                with urllib.request.urlopen(req) as response:
+                    token_response = json.loads(response.read())
+
+                # Verify the ID token and get user info
+                id_info = id_token.verify_oauth2_token(
+                    token_response["id_token"],
+                    google_requests.Request(),
+                    GMAIL_CLIENT_ID
+                )
+
+                user_email = id_info.get("email", "")
+                user_name = id_info.get("name", "Unknown")
+
+                # Check if user is allowed (must be one of the Gmail accounts)
+                if user_email not in GMAIL_ACCOUNTS:
+                    self._set_html_headers(403)
+                    self.wfile.write(f"""
+                    <html><head><title>Access Denied</title>
+                    <style>body {{ font-family: -apple-system, sans-serif; padding: 40px; max-width: 500px; margin: 0 auto; }}</style>
+                    </head><body>
+                    <h1>Access Denied</h1>
+                    <p>Email <strong>{user_email}</strong> is not authorized.</p>
+                    <p>Allowed accounts: {', '.join(GMAIL_ACCOUNTS)}</p>
+                    <p><a href="/login">Try another account</a></p>
+                    </body></html>
+                    """.encode())
+                    return
+
+                # Create device token
+                device_name = params.get("device", ["Web Browser"])[0]
+                device_token = create_device(user_email, device_name)
+
+                # Show success page with token
+                self._set_html_headers()
+                self.wfile.write(f"""
+                <html><head><title>Login Successful</title>
+                <meta name="viewport" content="width=device-width, initial-scale=1">
+                <style>
+                    body {{ font-family: -apple-system, BlinkMacSystemFont, sans-serif; padding: 40px; max-width: 500px; margin: 0 auto; background: #f5f5f5; }}
+                    .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                    h1 {{ color: #1a73e8; margin-top: 0; }}
+                    .token {{ background: #f0f0f0; padding: 15px; border-radius: 8px; word-break: break-all; font-family: monospace; font-size: 12px; margin: 20px 0; }}
+                    .copy-btn {{ background: #1a73e8; color: white; border: none; padding: 12px 24px; border-radius: 6px; font-size: 16px; cursor: pointer; width: 100%; }}
+                    .copy-btn:hover {{ background: #1557b0; }}
+                    .info {{ color: #666; font-size: 14px; margin-top: 20px; }}
+                </style>
+                </head><body>
+                <div class="card">
+                    <h1>Welcome, {user_name}!</h1>
+                    <p>Your device token (valid for 90 days):</p>
+                    <div class="token" id="token">{device_token}</div>
+                    <button class="copy-btn" onclick="navigator.clipboard.writeText('{device_token}').then(() => this.textContent = 'Copied!')">
+                        Copy Token
+                    </button>
+                    <p class="info">
+                        Use this token with Claude:<br>
+                        <code>?token=YOUR_TOKEN</code>
+                    </p>
+                </div>
+                </body></html>
+                """.encode())
+                return
+
+            except Exception as e:
+                self._set_html_headers(500)
+                self.wfile.write(f"<h1>Login Error</h1><p>{str(e)}</p>".encode())
+                return
+
+        # Auth status - check if a token is valid
+        if path == "/auth/status":
+            token = params.get("token", [None])[0]
+            device = validate_device_token(token) if token else None
+            self._set_headers()
+            if device:
+                self.wfile.write(json.dumps({
+                    "authenticated": True,
+                    "email": device.get("email"),
+                    "device": device.get("device_name"),
+                    "expires_at": device.get("expires_at")
+                }).encode())
+            else:
+                self.wfile.write(json.dumps({"authenticated": False}).encode())
+            return
+
+        # === PROTECTED ENDPOINTS (auth required) ===
+
+        if not self._check_auth():
             self._set_headers(401)
-            self.wfile.write(json.dumps({"error": "Unauthorized. Add ?key=YOUR_API_KEY to URL"}).encode())
+            self.wfile.write(json.dumps({
+                "error": "Unauthorized",
+                "login_url": f"{SERVER_URL}/login"
+            }).encode())
             return
 
         # === TASKS ===
@@ -262,6 +557,29 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
                 "syncedAt": notes_data.get("syncedAt")
             }).encode())
 
+        # === CONTEXT (MD Files) ===
+        elif path == "/context":
+            self._set_headers()
+            self.wfile.write(json.dumps(context_data).encode())
+
+        elif path.startswith("/context/"):
+            # Get specific file: /context/CLAUDE.md
+            filename = path.replace("/context/", "")
+            files = context_data.get("files", {})
+            if filename in files:
+                self._set_headers()
+                self.wfile.write(json.dumps({
+                    "filename": filename,
+                    "content": files[filename],
+                    "syncedAt": context_data.get("syncedAt")
+                }).encode())
+            else:
+                self._set_headers(404)
+                self.wfile.write(json.dumps({
+                    "error": f"File not found: {filename}",
+                    "available": list(files.keys())
+                }).encode())
+
         # === GMAIL ===
         elif path == "/emails/unread":
             all_emails = []
@@ -296,6 +614,108 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
             self._set_headers()
             self.wfile.write(json.dumps(status).encode())
 
+        # === HTML BRIEFING PAGE ===
+        elif path == "/briefing":
+            # Get today's tasks
+            now = datetime.now()
+            today_tasks = [t for t in tasks_data.get("tasks", [])
+                          if not t.get("completedAt")
+                          and not t.get("dismissedAt")
+                          and (not t.get("startAt") or t.get("startAt") <= now.timestamp())
+                          and (not t.get("hideUntil") or t.get("hideUntil") <= now.timestamp())]
+            today_tasks.sort(key=lambda t: t.get("score", 0), reverse=True)
+            top_tasks = today_tasks[:10]
+
+            # Get unread emails
+            all_emails = []
+            for email in GMAIL_ACCOUNTS:
+                if email:
+                    all_emails.extend(fetch_emails(email, max_results=10, query="is:unread"))
+            all_emails.sort(key=lambda x: x.get('date', ''), reverse=True)
+
+            # Get context
+            context_files = context_data.get("files", {})
+            claude_md = context_files.get("CLAUDE.md", "")
+
+            # Build HTML
+            tasks_html = ""
+            for i, t in enumerate(top_tasks, 1):
+                score = t.get("score", 0)
+                content = t.get("content", "")[:80]
+                tasks_html += f'<div class="task"><span class="num">{i}.</span> <span class="score">{score}</span> {content}</div>'
+
+            emails_html = ""
+            for e in all_emails[:5]:
+                sender = e.get("from", "")[:30]
+                subject = e.get("subject", "")[:50]
+                if "error" not in e:
+                    emails_html += f'<div class="email"><b>{sender}</b><br>{subject}</div>'
+
+            self._set_html_headers()
+            self.wfile.write(f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Chief of Staff Briefing</title>
+    <style>
+        * {{ box-sizing: border-box; }}
+        body {{
+            font-family: -apple-system, BlinkMacSystemFont, sans-serif;
+            background: #1a1a2e; color: #eee;
+            margin: 0; padding: 20px;
+            max-width: 600px; margin: 0 auto;
+        }}
+        h1 {{ color: #4fc3f7; margin-bottom: 5px; }}
+        .date {{ color: #888; margin-bottom: 20px; }}
+        h2 {{ color: #81c784; border-bottom: 1px solid #333; padding-bottom: 5px; margin-top: 25px; }}
+        .task {{
+            background: #252540; padding: 12px; margin: 8px 0;
+            border-radius: 8px; border-left: 3px solid #4fc3f7;
+        }}
+        .task .num {{ color: #4fc3f7; font-weight: bold; }}
+        .task .score {{
+            background: #4fc3f7; color: #000;
+            padding: 2px 6px; border-radius: 4px;
+            font-size: 12px; margin-left: 5px;
+        }}
+        .email {{
+            background: #252540; padding: 12px; margin: 8px 0;
+            border-radius: 8px; border-left: 3px solid #ff8a65;
+        }}
+        .context {{
+            background: #252540; padding: 15px;
+            border-radius: 8px; white-space: pre-wrap;
+            font-size: 14px; line-height: 1.5;
+        }}
+        .refresh {{
+            position: fixed; bottom: 20px; right: 20px;
+            background: #4fc3f7; color: #000;
+            border: none; padding: 15px 20px;
+            border-radius: 50px; font-size: 16px;
+            cursor: pointer;
+        }}
+    </style>
+</head>
+<body>
+    <h1>Guten Morgen!</h1>
+    <div class="date">{now.strftime("%A, %d. %B %Y")}</div>
+
+    <h2>Top Tasks ({len(today_tasks)} offen)</h2>
+    {tasks_html if tasks_html else '<div class="task">Keine Tasks für heute</div>'}
+
+    <h2>Emails ({len(all_emails)} ungelesen)</h2>
+    {emails_html if emails_html else '<div class="email">Keine ungelesenen Emails</div>'}
+
+    <h2>Kontext</h2>
+    <div class="context">{claude_md[:500] if claude_md else 'Kein Kontext gespeichert'}</div>
+
+    <button class="refresh" onclick="location.reload()">↻</button>
+</body>
+</html>
+            """.encode())
+
         else:
             self._set_headers(404)
             self.wfile.write(json.dumps({"error": "Not found"}).encode())
@@ -306,10 +726,13 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
 
-        # Check API key
-        if not self._check_api_key():
+        # Check auth (allow API key for POST - needed for Amplenote sync)
+        if not self._check_auth(allow_api_key=True):
             self._set_headers(401)
-            self.wfile.write(json.dumps({"error": "Unauthorized"}).encode())
+            self.wfile.write(json.dumps({
+                "error": "Unauthorized",
+                "login_url": f"{SERVER_URL}/login"
+            }).encode())
             return
 
         if path == "/tasks":
@@ -344,6 +767,26 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
                     "count": len(notes_data["notes"])
                 }).encode())
                 print(f"Received {len(notes_data['notes'])} notes")
+            except json.JSONDecodeError:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+
+        elif path == "/context":
+            # Receive context files (MD files from local machine)
+            global context_data
+            try:
+                data = json.loads(body)
+                context_data = {
+                    "files": data.get("files", {}),
+                    "syncedAt": data.get("syncedAt", datetime.now().timestamp() * 1000)
+                }
+                save_context()
+                self._set_headers()
+                self.wfile.write(json.dumps({
+                    "success": True,
+                    "files": list(context_data["files"].keys())
+                }).encode())
+                print(f"Received context files: {list(context_data['files'].keys())}")
             except json.JSONDecodeError:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
@@ -384,12 +827,15 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
 
 def main():
     load_data()
+    load_devices()
 
     server = HTTPServer(("0.0.0.0", PORT), ChiefOfStaffHandler)
     print(f"Chief of Staff Server running on port {PORT}")
     print(f"Tasks: {len(tasks_data.get('tasks', []))} | Notes: {len(notes_data.get('notes', []))}")
+    print(f"Devices: {len(devices_data.get('devices', []))}")
     print(f"Gmail accounts: {', '.join(a for a in GMAIL_ACCOUNTS if a)}")
     print(f"Data directory: {DATA_DIR}")
+    print(f"Login URL: {SERVER_URL}/login")
 
     try:
         server.serve_forever()
