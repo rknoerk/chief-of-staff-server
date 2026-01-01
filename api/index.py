@@ -237,10 +237,22 @@ def debug_redis():
         val = redis.get("_test")
         # Get all keys
         keys = redis.keys("*")
+        # Read context directly
+        ctx_raw = redis.get("context")
+        ctx_type = type(ctx_raw).__name__
+        # Try to parse
+        if isinstance(ctx_raw, str):
+            ctx_parsed = json.loads(ctx_raw)
+        elif isinstance(ctx_raw, dict):
+            ctx_parsed = ctx_raw
+        else:
+            ctx_parsed = {"raw": str(ctx_raw)[:200]}
         return cors_response({
             "write_test": "ok",
             "read_test": val,
-            "all_keys": keys
+            "all_keys": keys,
+            "context_raw_type": ctx_type,
+            "context_files": list(ctx_parsed.get("files", {}).keys()) if isinstance(ctx_parsed, dict) else "parse_error"
         })
     except Exception as e:
         return cors_response({"error": str(e)}, 500)
