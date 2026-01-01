@@ -306,6 +306,12 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length)
 
+        # Check API key
+        if not self._check_api_key():
+            self._set_headers(401)
+            self.wfile.write(json.dumps({"error": "Unauthorized"}).encode())
+            return
+
         if path == "/tasks":
             try:
                 data = json.loads(body)

@@ -1,10 +1,17 @@
 #!/bin/bash
-# Upload local Gmail tokens to Railway server
-# Usage: ./upload-tokens.sh https://your-app.railway.app
+# Upload local Gmail tokens to cloud server
+# Usage: ./upload-tokens.sh https://your-app.fly.dev [api-key]
 
 SERVER_URL="${1:-http://localhost:8080}"
+API_KEY="${2:-}"
 
 echo "Uploading Gmail tokens to $SERVER_URL"
+
+# Build key param
+KEY_PARAM=""
+if [ -n "$API_KEY" ]; then
+    KEY_PARAM="?key=$API_KEY"
+fi
 
 # Upload tokens for each account
 for token_file in ~/.config/gmail-mcp/token_*.json; do
@@ -17,7 +24,7 @@ for token_file in ~/.config/gmail-mcp/token_*.json; do
 
         token_content=$(cat "$token_file")
 
-        curl -s -X POST "$SERVER_URL/gmail/token" \
+        curl -s -X POST "${SERVER_URL}/gmail/token${KEY_PARAM}" \
             -H "Content-Type: application/json" \
             -d "{\"email\": \"$email\", \"token\": $token_content}"
 
@@ -26,4 +33,4 @@ for token_file in ~/.config/gmail-mcp/token_*.json; do
 done
 
 echo "Done. Check status:"
-curl -s "$SERVER_URL/gmail/status" | python3 -m json.tool
+curl -s "${SERVER_URL}/gmail/status${KEY_PARAM}" | python3 -m json.tool
