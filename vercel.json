@@ -1,23 +1,5 @@
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "api/index.py",
-      "use": "@vercel/python"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "api/index.py"
-    }
-  ],
-  "env": {
-    "GMAIL_CLIENT_ID": "@gmail-client-id",
-    "GMAIL_CLIENT_SECRET": "@gmail-client-secret",
-    "GMAIL_ACCOUNTS": "@gmail-accounts",
-    "API_KEY": "@api-key",
-    "KV_REST_API_URL": "@kv-rest-api-url",
-    "KV_REST_API_TOKEN": "@kv-rest-api-token"
-  }
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/api" }
+  ]
 }
