@@ -2,7 +2,7 @@
 # Sync local MD files to Chief of Staff server
 # Usage: ./sync-context.sh
 
-SERVER_URL="https://web-production-a841f.up.railway.app"
+SERVER_URL="https://chief-of-staff-server.vercel.app"
 API_KEY="cos-2026-mobile"
 CONTEXT_DIR="$HOME/chief-of-staff"
 

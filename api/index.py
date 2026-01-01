@@ -46,21 +46,28 @@ if KV_URL and KV_TOKEN:
 def get_data(key, default=None):
     """Get data from Redis."""
     if not redis:
+        print(f"[WARN] Redis not connected, returning default for {key}")
         return default
     try:
         data = redis.get(key)
-        return json.loads(data) if data else default
-    except:
+        if data:
+            return json.loads(data) if isinstance(data, str) else data
+        return default
+    except Exception as e:
+        print(f"[ERROR] get_data({key}): {e}")
         return default
 
 def set_data(key, value):
     """Set data in Redis."""
     if not redis:
+        print(f"[WARN] Redis not connected, cannot save {key}")
         return False
     try:
         redis.set(key, json.dumps(value))
+        print(f"[OK] Saved {key}")
         return True
-    except:
+    except Exception as e:
+        print(f"[ERROR] set_data({key}): {e}")
         return False
 
 # =============================================================================
@@ -206,14 +213,37 @@ def health():
     tasks = get_data("tasks", {"tasks": []})
     notes = get_data("notes", {"notes": []})
     devices = get_data("devices", {"devices": []})
+    context = get_data("context", {"files": {}})
     return cors_response({
         "status": "ok",
         "storage": "connected" if redis else "not configured",
+        "redis_url": KV_URL[:30] + "..." if KV_URL else "not set",
         "tasks": len(tasks.get("tasks", [])),
         "notes": len(notes.get("notes", [])),
+        "context_files": list(context.get("files", {}).keys()),
         "gmail_accounts": len(GMAIL_ACCOUNTS),
         "devices": len(devices.get("devices", []))
     })
+
+@app.route("/debug/redis", methods=["GET"])
+def debug_redis():
+    """Debug endpoint to test Redis directly."""
+    if not redis:
+        return cors_response({"error": "Redis not connected", "url": KV_URL, "token_set": bool(KV_TOKEN)})
+    try:
+        # Test write
+        redis.set("_test", "hello")
+        # Test read
+        val = redis.get("_test")
+        # Get all keys
+        keys = redis.keys("*")
+        return cors_response({
+            "write_test": "ok",
+            "read_test": val,
+            "all_keys": keys
+        })
+    except Exception as e:
+        return cors_response({"error": str(e)}, 500)
 
 # === Google Sign-In ===
 
