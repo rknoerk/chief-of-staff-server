@@ -112,7 +112,19 @@ Five markdown files stored on server:
 | `INBOX.md` | Quick captures, unprocessed items |
 | `DECISIONS.md` | Decision log with rationale |
 
-## Local Skills (Claude Code)
+## Skills
+
+### Claude App (Mobile)
+
+Located in `skill/`:
+
+```bash
+cd skill && ./build.sh   # Creates chief-of-staff.skill
+```
+
+Import `chief-of-staff.skill` into Claude App → Projects.
+
+### Claude Code (Desktop)
 
 Located in `~/.claude/commands/`:
 
