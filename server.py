@@ -197,8 +197,12 @@ def save_context():
 # Gmail Functions
 # =============================================================================
 
-SCOPES = ['https://www.googleapis.com/auth/gmail.readonly']
+SCOPES = [
+    'https://www.googleapis.com/auth/gmail.readonly',
+    'https://www.googleapis.com/auth/calendar.readonly'
+]
 gmail_services = {}
+calendar_services = {}
 
 def get_gmail_credentials_config():
     """Build credentials config from environment."""
@@ -227,16 +231,20 @@ def get_gmail_service(email):
     if not os.path.exists(token_file):
         return None
 
-    creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+    try:
+        # Load without specifying scopes - use scopes from token file
+        creds = Credentials.from_authorized_user_file(token_file)
 
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        with open(token_file, 'w') as f:
-            f.write(creds.to_json())
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(token_file, 'w') as f:
+                f.write(creds.to_json())
 
-    if creds and creds.valid:
-        gmail_services[email] = build('gmail', 'v1', credentials=creds)
-        return gmail_services[email]
+        if creds and creds.valid:
+            gmail_services[email] = build('gmail', 'v1', credentials=creds)
+            return gmail_services[email]
+    except Exception as e:
+        print(f"Gmail service error for {email}: {e}")
 
     return None
 
@@ -279,6 +287,159 @@ def fetch_emails(email, max_results=10, query="is:unread", hours_back=24):
             })
 
         return emails
+    except Exception as e:
+        return [{"error": str(e), "account": email}]
+
+# =============================================================================
+# Calendar Functions
+# =============================================================================
+
+def get_calendar_service(email):
+    """Get Calendar service for an account (must be pre-authenticated)."""
+    global calendar_services
+
+    if email in calendar_services:
+        return calendar_services[email]
+
+    token_file = get_token_file(email)
+    if not os.path.exists(token_file):
+        return None
+
+    try:
+        # Load without specifying scopes - use scopes from token file
+        creds = Credentials.from_authorized_user_file(token_file)
+
+        if creds and creds.expired and creds.refresh_token:
+            creds.refresh(Request())
+            with open(token_file, 'w') as f:
+                f.write(creds.to_json())
+
+        if creds and creds.valid:
+            calendar_services[email] = build('calendar', 'v3', credentials=creds)
+            return calendar_services[email]
+    except Exception as e:
+        print(f"Calendar service error for {email}: {e}")
+
+    return None
+
+def fetch_calendar_events(email, days_ahead=7, max_results=20):
+    """Fetch upcoming calendar events from an account."""
+    service = get_calendar_service(email)
+    if not service:
+        return [{"error": f"Not authenticated for calendar: {email}", "account": email}]
+
+    try:
+        now = datetime.utcnow()
+        time_min = now.isoformat() + 'Z'
+        time_max = (now + timedelta(days=days_ahead)).isoformat() + 'Z'
+
+        # Get list of calendars
+        calendar_list = service.calendarList().list().execute()
+        all_events = []
+
+        for cal in calendar_list.get('items', []):
+            cal_id = cal['id']
+            cal_name = cal.get('summary', cal_id)
+
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    maxResults=max_results,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+
+                for event in events_result.get('items', []):
+                    start = event.get('start', {})
+                    end = event.get('end', {})
+
+                    # Handle all-day vs timed events
+                    start_str = start.get('dateTime', start.get('date', ''))
+                    end_str = end.get('dateTime', end.get('date', ''))
+                    is_all_day = 'date' in start and 'dateTime' not in start
+
+                    all_events.append({
+                        'id': event.get('id'),
+                        'summary': event.get('summary', '(Kein Titel)'),
+                        'description': event.get('description', ''),
+                        'location': event.get('location', ''),
+                        'start': start_str,
+                        'end': end_str,
+                        'all_day': is_all_day,
+                        'calendar': cal_name,
+                        'account': email,
+                        'status': event.get('status', 'confirmed'),
+                        'html_link': event.get('htmlLink', '')
+                    })
+            except Exception as e:
+                # Skip calendars with errors (e.g., no access)
+                continue
+
+        # Sort by start time
+        all_events.sort(key=lambda x: x.get('start', ''))
+        return all_events
+
+    except Exception as e:
+        return [{"error": str(e), "account": email}]
+
+def fetch_todays_events(email):
+    """Fetch only today's events."""
+    service = get_calendar_service(email)
+    if not service:
+        return [{"error": f"Not authenticated for calendar: {email}", "account": email}]
+
+    try:
+        now = datetime.utcnow()
+        # Start of today (UTC)
+        today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        # End of today (UTC)
+        today_end = today_start + timedelta(days=1)
+
+        time_min = today_start.isoformat() + 'Z'
+        time_max = today_end.isoformat() + 'Z'
+
+        calendar_list = service.calendarList().list().execute()
+        all_events = []
+
+        for cal in calendar_list.get('items', []):
+            cal_id = cal['id']
+            cal_name = cal.get('summary', cal_id)
+
+            try:
+                events_result = service.events().list(
+                    calendarId=cal_id,
+                    timeMin=time_min,
+                    timeMax=time_max,
+                    maxResults=50,
+                    singleEvents=True,
+                    orderBy='startTime'
+                ).execute()
+
+                for event in events_result.get('items', []):
+                    start = event.get('start', {})
+                    end = event.get('end', {})
+                    start_str = start.get('dateTime', start.get('date', ''))
+                    end_str = end.get('dateTime', end.get('date', ''))
+                    is_all_day = 'date' in start and 'dateTime' not in start
+
+                    all_events.append({
+                        'id': event.get('id'),
+                        'summary': event.get('summary', '(Kein Titel)'),
+                        'start': start_str,
+                        'end': end_str,
+                        'all_day': is_all_day,
+                        'location': event.get('location', ''),
+                        'calendar': cal_name,
+                        'account': email
+                    })
+            except:
+                continue
+
+        all_events.sort(key=lambda x: x.get('start', ''))
+        return all_events
+
     except Exception as e:
         return [{"error": str(e), "account": email}]
 
@@ -383,10 +544,33 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
 
+        # Auth services - Gmail + Calendar OAuth (uses same /callback endpoint)
+        if path == "/auth/services":
+            # Build Google OAuth URL with Gmail + Calendar scopes
+            state = "services_" + secrets.token_urlsafe(16)
+            oauth_params = {
+                "client_id": GMAIL_CLIENT_ID,
+                "redirect_uri": f"{SERVER_URL}/callback",  # Use same callback
+                "response_type": "code",
+                "scope": "openid email profile https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/calendar.readonly",
+                "state": state,
+                "access_type": "offline",
+                "prompt": "consent"  # Force consent to get refresh token
+            }
+            google_auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(oauth_params)}"
+
+            # Redirect to Google
+            self.send_response(302)
+            self.send_header("Location", google_auth_url)
+            self.end_headers()
+            return
+
         # OAuth callback from Google
         if path == "/callback":
             code = params.get("code", [None])[0]
             error = params.get("error", [None])[0]
+            state = params.get("state", [""])[0]
+            is_services_auth = state.startswith("services_")
 
             if error:
                 self._set_html_headers(400)
@@ -442,7 +626,55 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
                     """.encode())
                     return
 
-                # Create device token
+                # Handle services auth (Gmail + Calendar OAuth tokens)
+                if is_services_auth:
+                    # Save the OAuth token for Gmail/Calendar access
+                    token_to_save = {
+                        "token": token_response.get("access_token"),
+                        "refresh_token": token_response.get("refresh_token"),
+                        "token_uri": "https://oauth2.googleapis.com/token",
+                        "client_id": GMAIL_CLIENT_ID,
+                        "client_secret": GMAIL_CLIENT_SECRET,
+                        "scopes": SCOPES,
+                        "account": user_email
+                    }
+
+                    token_file = get_token_file(user_email)
+                    with open(token_file, 'w') as f:
+                        json.dump(token_to_save, f)
+
+                    # Clear cached services to reload with new token
+                    if user_email in gmail_services:
+                        del gmail_services[user_email]
+                    if user_email in calendar_services:
+                        del calendar_services[user_email]
+
+                    self._set_html_headers()
+                    self.wfile.write(f"""
+                    <html><head><title>Services Connected</title>
+                    <meta name="viewport" content="width=device-width, initial-scale=1">
+                    <style>
+                        body {{ font-family: -apple-system, sans-serif; padding: 40px; max-width: 500px; margin: 0 auto; background: #f5f5f5; }}
+                        .card {{ background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }}
+                        h1 {{ color: #34a853; margin-top: 0; }}
+                        .check {{ font-size: 48px; text-align: center; }}
+                        .next {{ margin-top: 20px; padding: 15px; background: #e8f5e9; border-radius: 8px; }}
+                    </style>
+                    </head><body>
+                    <div class="card">
+                        <div class="check">✅</div>
+                        <h1>Gmail + Kalender verbunden!</h1>
+                        <p><strong>{user_email}</strong></p>
+                        <div class="next">
+                            <p>Nächster Account? <a href="/auth/services">Weiteren Account verbinden</a></p>
+                        </div>
+                        <p style="color: #666; margin-top: 20px;">Du kannst dieses Fenster schließen wenn alle Accounts verbunden sind.</p>
+                    </div>
+                    </body></html>
+                    """.encode())
+                    return
+
+                # Normal login - Create device token
                 device_name = params.get("device", ["Web Browser"])[0]
                 device_token = create_device(user_email, device_name)
 
@@ -613,6 +845,46 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
                     status[email] = "authenticated" if os.path.exists(token_file) else "not_authenticated"
             self._set_headers()
             self.wfile.write(json.dumps(status).encode())
+
+        # === CALENDAR ===
+        elif path == "/calendar/today":
+            all_events = []
+            for email in GMAIL_ACCOUNTS:
+                if email:
+                    all_events.extend(fetch_todays_events(email))
+            all_events.sort(key=lambda x: x.get('start', ''))
+            self._set_headers()
+            self.wfile.write(json.dumps({
+                "events": all_events,
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "fetchedAt": datetime.now().isoformat()
+            }).encode())
+
+        elif path == "/calendar/upcoming":
+            days = int(params.get("days", [7])[0])
+            all_events = []
+            for email in GMAIL_ACCOUNTS:
+                if email:
+                    all_events.extend(fetch_calendar_events(email, days_ahead=days))
+            all_events.sort(key=lambda x: x.get('start', ''))
+            self._set_headers()
+            self.wfile.write(json.dumps({
+                "events": all_events,
+                "days_ahead": days,
+                "fetchedAt": datetime.now().isoformat()
+            }).encode())
+
+        elif path == "/calendar/week":
+            all_events = []
+            for email in GMAIL_ACCOUNTS:
+                if email:
+                    all_events.extend(fetch_calendar_events(email, days_ahead=7))
+            all_events.sort(key=lambda x: x.get('start', ''))
+            self._set_headers()
+            self.wfile.write(json.dumps({
+                "events": all_events,
+                "fetchedAt": datetime.now().isoformat()
+            }).encode())
 
         # === HTML BRIEFING PAGE ===
         elif path == "/briefing":
@@ -787,6 +1059,46 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
                     "files": list(context_data["files"].keys())
                 }).encode())
                 print(f"Received context files: {list(context_data['files'].keys())}")
+            except json.JSONDecodeError:
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
+
+        elif path.startswith("/context/"):
+            # Update a single context file: POST /context/CLAUDE.md
+            # Requires device token auth
+            if not self._check_auth():
+                self._set_headers(401)
+                self.wfile.write(json.dumps({"error": "Unauthorized"}).encode())
+                return
+
+            filename = path.replace("/context/", "")
+            if not filename.endswith(".md"):
+                self._set_headers(400)
+                self.wfile.write(json.dumps({"error": "Only .md files allowed"}).encode())
+                return
+
+            try:
+                data = json.loads(body)
+                content = data.get("content")
+                if content is None:
+                    self._set_headers(400)
+                    self.wfile.write(json.dumps({"error": "Missing content"}).encode())
+                    return
+
+                # Update the file in context_data
+                if "files" not in context_data:
+                    context_data["files"] = {}
+                context_data["files"][filename] = content
+                context_data["syncedAt"] = datetime.now().timestamp() * 1000
+                save_context()
+
+                self._set_headers()
+                self.wfile.write(json.dumps({
+                    "success": True,
+                    "file": filename,
+                    "updatedAt": context_data["syncedAt"]
+                }).encode())
+                print(f"Updated context file: {filename}")
             except json.JSONDecodeError:
                 self._set_headers(400)
                 self.wfile.write(json.dumps({"error": "Invalid JSON"}).encode())
