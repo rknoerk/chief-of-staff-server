@@ -42,7 +42,7 @@ A personal productivity server that gives Claude (or any AI assistant) access to
 
 ## The 8 Workflows
 
-Based on [Joe's Chief of Staff Prompt Suite](https://every.to/):
+Based on [Nate's Chief of Staff Prompt Suite](https://every.to/):
 
 | Command | Purpose |
 |---------|---------|
