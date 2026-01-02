@@ -36,7 +36,7 @@ GMAIL_ACCOUNTS = os.environ.get("GMAIL_ACCOUNTS", "").split(",")
 API_KEY = os.environ.get("API_KEY", "")
 
 # Server URL for OAuth callback
-SERVER_URL = os.environ.get("SERVER_URL", "https://web-production-a841f.up.railway.app")
+SERVER_URL = os.environ.get("SERVER_URL", "http://localhost:8080")
 
 # Create data directory
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -45,57 +45,6 @@ TASKS_FILE = os.path.join(DATA_DIR, "tasks.json")
 NOTES_FILE = os.path.join(DATA_DIR, "notes.json")
 DEVICES_FILE = os.path.join(DATA_DIR, "devices.json")
 CONTEXT_FILE = os.path.join(DATA_DIR, "context.json")
-
-# =============================================================================
-# Chief of Staff Skill Instructions (for mobile)
-# =============================================================================
-
-COS_SKILL_INSTRUCTIONS = """
-# Chief of Staff
-
-Du bist mein Chief of Staff. Hilf mir meinen Tag zu organisieren.
-
-## Setup
-
-Falls kein Token vorhanden, zeige:
-"Hol dir deinen Token: https://chief-of-staff-cos.fly.dev/login"
-Frage dann: "Wie lautet dein Token?"
-
-## Nach Token-Eingabe
-
-Frage: "Was kann ich für dich tun? 1. Briefing, 2. Tasks, 3. Emails, 4. Kontext, 5. Frage"
-
-## Endpoints (mit ?key=cos-2026-mobile&token=USER_TOKEN)
-
-- Context: https://chief-of-staff-cos.fly.dev/context
-- Tasks heute: https://chief-of-staff-cos.fly.dev/tasks/today
-- Emails: https://chief-of-staff-cos.fly.dev/emails/unread
-- Werkbank: https://chief-of-staff-cos.fly.dev/notes/werkbank
-- Projekte: https://chief-of-staff-cos.fly.dev/notes/projects
-
-## Briefing Format
-
-Guten Morgen! [Datum]
-
-**Kontext:** [Aus CLAUDE.md]
-
-**Top 3 Tasks:** [Höchster Score]
-1. [Task] - Score X
-2. [Task] - Score X
-3. [Task] - Score X
-
-**Emails:** [Anzahl] ungelesen
-- [Absender]: [Betreff]
-
-**Projekte:** [Aus Werkbank]
-
-Frage: "Worauf fokussierst du dich heute?"
-
-## Regeln
-- Deutsch
-- Prägnant
-- Bei 403/401: Token-Problem erklären
-"""
 
 # =============================================================================
 # Device Token Storage
@@ -509,15 +458,6 @@ class ChiefOfStaffHandler(BaseHTTPRequestHandler):
                 "notes": len(notes_data.get("notes", [])),
                 "gmail_accounts": len([e for e in GMAIL_ACCOUNTS if e]),
                 "devices": len(devices_data.get("devices", []))
-            }).encode())
-            return
-
-        # Skill instructions for mobile Claude
-        if path == "/skill":
-            self._set_headers()
-            self.wfile.write(json.dumps({
-                "skill": "Chief of Staff",
-                "instructions": COS_SKILL_INSTRUCTIONS
             }).encode())
             return
 

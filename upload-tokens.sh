@@ -1,6 +1,6 @@
 #!/bin/bash
 # Upload local Gmail tokens to cloud server
-# Usage: ./upload-tokens.sh https://your-app.fly.dev [api-key]
+# Usage: ./upload-tokens.sh https://YOUR_SERVER_URL [api-key]
 
 SERVER_URL="${1:-http://localhost:8080}"
 API_KEY="${2:-}"
